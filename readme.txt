@@ -1,4 +1,4 @@
-=== Stupid Simple IMage Converter ===
+=== Stupid Simple Image Converter ===
 Contributors: bedynamictech
 Tags: media, image converter
 Tested up to: 6.9
