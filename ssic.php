@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: Stupid Simple Image Converter
-Description: Automatically convert uploaded PNG and JPG images to WebP format.
-Version: 1.2
+Description: Automatically convert uploaded PNG, JPG, and GIF images to WebP format.
+Version: 1.3
 Author: Dynamic Technologies
 Author URI: https://bedynamic.tech
 Plugin URI: https://github.com/bedynamictech/Stupid-Simple-Image-Converter
@@ -10,234 +10,294 @@ License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 */
 
-// Prevent direct access
-if ( ! defined( 'ABSPATH' ) ) {
-    exit;
-}
+if ( ! defined( 'ABSPATH' ) ) exit;
 
-// Add Settings link on Plugins page
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+define( 'SSIC_QUALITY_OPTIONS', [ 50, 85, 100 ] );
+define( 'SSIC_DEFAULT_QUALITY', 85 );
+define( 'SSIC_META_KEY',        'ssic_converted' );
+define( 'SSIC_MENU_SLUG',       'stupidsimple' );
+define( 'SSIC_PAGE_SLUG',       'ssic-settings' );
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
 add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), 'ssic_action_links' );
 function ssic_action_links( $links ) {
-    $settings_link = '<a href="' . admin_url( 'admin.php?page=ssic-settings' ) . '">Settings</a>';
-    array_unshift( $links, $settings_link );
+    array_unshift( $links, '<a href="' . admin_url( 'admin.php?page=' . SSIC_PAGE_SLUG ) . '">Settings</a>' );
     return $links;
 }
 
-// Register setting for quality
 add_action( 'admin_init', 'ssic_register_settings' );
 function ssic_register_settings() {
-    register_setting( 'ssic_settings_group', 'ssic_quality', array(
+    register_setting( 'ssic_settings_group', 'ssic_quality', [
         'type'              => 'integer',
-        'description'       => 'Quality for WebP conversion (50,85,100)',
-        'default'           => 85,
-        'sanitize_callback' => 'absint',
-    ) );
+        'default'           => SSIC_DEFAULT_QUALITY,
+        'sanitize_callback' => function( $val ) {
+            return in_array( (int) $val, SSIC_QUALITY_OPTIONS, true ) ? (int) $val : SSIC_DEFAULT_QUALITY;
+        },
+    ] );
 }
 
-// Add main menu and submenu
-add_action( 'admin_menu', 'ssic_add_menu' );
+// ─── Admin Menu ───────────────────────────────────────────────────────────────
 
+add_action( 'admin_menu', 'ssic_add_menu' );
 function ssic_add_menu() {
     global $menu;
+
     $parent_exists = false;
-    foreach ($menu as $item) {
-        if (!empty($item[2]) && $item[2] === 'stupidsimple') {
+    foreach ( $menu as $item ) {
+        if ( ! empty( $item[2] ) && $item[2] === SSIC_MENU_SLUG ) {
             $parent_exists = true;
             break;
         }
     }
 
-    if (!$parent_exists) {
-        add_menu_page(
-            'Stupid Simple',
-            'Stupid Simple',
-            'manage_options',
-            'stupidsimple',
-            'ssic_settings_page_content',
-            'dashicons-hammer',
-            99
-        );
+    if ( ! $parent_exists ) {
+        add_menu_page( 'Stupid Simple', 'Stupid Simple', 'manage_options', SSIC_MENU_SLUG, 'ssic_settings_page', 'dashicons-hammer', 99 );
     }
 
-    add_submenu_page(
-        'stupidsimple',
-        'Image Converter',
-        'Image Converter',
-        'manage_options',
-        'ssic-settings',
-        'ssic_settings_page_content'
-    );
+    add_submenu_page( SSIC_MENU_SLUG, 'Image Converter', 'Image Converter', 'manage_options', SSIC_PAGE_SLUG, 'ssic_settings_page' );
 }
 
-// Handle mass-convert request
-add_action( 'admin_post_ssic_mass_convert', 'ssic_handle_mass_convert' );
-function ssic_handle_mass_convert() {
-    if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'ssic_mass_convert' ) ) {
-        wp_die( __( 'Unauthorized request', 'ssic' ) );
-    }
-    $processed = 0;
-    $args = array(
-        'post_type'      => 'attachment',
-        'post_status'    => 'inherit',
-        'numberposts'    => -1,
-        'post_mime_type' => array( 'image/jpeg', 'image/png', 'image/gif' ),
-    );
-    $attachments = get_posts( $args );
-    foreach ( $attachments as $att ) {
-        $id = $att->ID;
-        if ( get_post_meta( $id, 'ssic_converted', true ) ) {
-            continue;
-        }
-        ssic_convert_to_webp( $id );
-        update_post_meta( $id, 'ssic_converted', time() );
-        $processed++;
-    }
-    wp_safe_redirect( add_query_arg( 'ssic_mass_converted', $processed, wp_get_referer() ) );
-    exit;
+// ─── Conversion ───────────────────────────────────────────────────────────────
+
+add_filter( 'wp_generate_attachment_metadata', 'ssic_on_metadata', 10, 2 );
+function ssic_on_metadata( $metadata, $attachment_id ) {
+    ssic_convert_to_webp( $attachment_id );
+    return $metadata;
 }
 
-// Show notice after mass conversion
-add_action( 'admin_notices', function() {
-    if ( isset( $_GET['ssic_mass_converted'] ) ) {
-        $n = intval( $_GET['ssic_mass_converted'] );
-        printf( '<div class="notice notice-success is-dismissible"><p>%s</p></div>',
-            sprintf( esc_html__( 'Converted %d images.', 'ssic' ), $n )
-        );
-    }
-});
+add_action( 'add_attachment', 'ssic_convert_to_webp' );
+function ssic_convert_to_webp( $attachment_id ) {
+    if ( get_post_meta( $attachment_id, SSIC_META_KEY, true ) ) return;
+    if ( ! wp_attachment_is_image( $attachment_id ) ) return;
 
-// Convert single image, skip if webp or already converted
-add_filter( 'wp_generate_attachment_metadata', 'ssic_convert_to_webp', 10, 2 );
-add_action( 'add_attachment', 'ssic_convert_to_webp', 10, 1 );
-function ssic_convert_to_webp( $metadata_or_id, $attachment_id = null ) {
-    $attachment_id = is_array( $metadata_or_id ) ? $attachment_id : $metadata_or_id;
-    $file          = get_attached_file( $attachment_id );
-    $ext           = strtolower( pathinfo( $file, PATHINFO_EXTENSION ) );
+    $file = get_attached_file( $attachment_id );
+    $ext  = strtolower( pathinfo( $file, PATHINFO_EXTENSION ) );
 
-    if ( 'webp' === $ext || ! wp_attachment_is_image( $attachment_id ) || get_post_meta( $attachment_id, 'ssic_converted', true ) ) {
-        return $metadata_or_id;
-    }
+    if ( $ext === 'webp' ) return;
 
-    $quality     = (int) get_option( 'ssic_quality', 85 );
-    $dest        = preg_replace( '/\.[^.]+$/', '.webp', $file );
+    $dest = preg_replace( '/\.[^.]+$/', '.webp', $file );
 
     if ( file_exists( $dest ) ) {
-        update_post_meta( $attachment_id, 'ssic_converted', time() );
-        return $metadata_or_id;
+        update_post_meta( $attachment_id, SSIC_META_KEY, time() );
+        return;
     }
 
-    $ok = false;
+    $quality = (int) get_option( 'ssic_quality', SSIC_DEFAULT_QUALITY );
+    $ok      = false;
 
     if ( class_exists( 'Imagick' ) ) {
         try {
-            $i = new Imagick( $file );
-            $i->setImageFormat( 'webp' );
-            $i->setImageCompressionQuality( $quality );
-            $ok = $i->writeImage( $dest );
-            $i->clear(); $i->destroy();
+            $imagick = new Imagick( $file );
+            $imagick->setImageFormat( 'webp' );
+            $imagick->setImageCompressionQuality( $quality );
+            $ok = $imagick->writeImage( $dest );
+            $imagick->clear();
+            $imagick->destroy();
         } catch ( Exception $e ) {}
     }
 
     if ( ! $ok && function_exists( 'imagewebp' ) ) {
-        switch ( $ext ) {
-            case 'jpg':
-            case 'jpeg':
-                $img = imagecreatefromjpeg( $file ); break;
-            case 'png':
-                $img = imagecreatefrompng( $file ); break;
-            case 'gif':
-                $img = imagecreatefromgif( $file ); break;
-            default:
-                $img = false;
-        }
+        $img = match( $ext ) {
+            'jpg', 'jpeg' => imagecreatefromjpeg( $file ),
+            'png'         => imagecreatefrompng( $file ),
+            'gif'         => imagecreatefromgif( $file ),
+            default       => false,
+        };
+
         if ( $img ) {
             if ( function_exists( 'imagepalettetotruecolor' ) ) {
-                @imagepalettetotruecolor( $img );
+                imagepalettetotruecolor( $img );
             }
-            $ok = @imagewebp( $img, $dest, $quality );
+            $ok = imagewebp( $img, $dest, $quality );
             imagedestroy( $img );
         }
     }
 
     if ( $ok ) {
-        update_post_meta( $attachment_id, 'ssic_converted', time() );
+        update_post_meta( $attachment_id, SSIC_META_KEY, time() );
     }
-
-    return $metadata_or_id;
 }
 
-// Serve WebP URLs
-add_filter( 'wp_get_attachment_url',   'ssic_serve_webp',       10, 2 );
+// ─── Serve WebP URLs ──────────────────────────────────────────────────────────
+
+add_filter( 'wp_get_attachment_url',       'ssic_serve_webp',   10, 2 );
 add_filter( 'wp_get_attachment_image_src', 'ssic_src_webp',     10, 4 );
-add_filter( 'wp_calculate_image_srcset',    'ssic_srcset_webp', 10, 5 );
+add_filter( 'wp_calculate_image_srcset',   'ssic_srcset_webp',  10, 5 );
+
+function ssic_webp_url( $url ) {
+    $upload   = wp_get_upload_dir();
+    $path     = str_replace( $upload['baseurl'], $upload['basedir'], $url );
+    $webp     = preg_replace( '/\.[^.]+$/', '.webp', $path );
+    return file_exists( $webp ) ? preg_replace( '/\.[^.]+$/', '.webp', $url ) : $url;
+}
+
 function ssic_serve_webp( $url, $id ) {
     $file = get_attached_file( $id );
     $webp = preg_replace( '/\.[^.]+$/', '.webp', $file );
-    if ( file_exists( $webp ) ) {
-        return preg_replace( '/\.[^.]+$/', '.webp', $url );
-    }
-    return $url;
+    return file_exists( $webp ) ? preg_replace( '/\.[^.]+$/', '.webp', $url ) : $url;
 }
+
 function ssic_src_webp( $image, $id, $size, $icon ) {
-    $url  = $image[0];
-    $path = str_replace( wp_get_upload_dir()['baseurl'], wp_get_upload_dir()['basedir'], $url );
-    $webp = preg_replace( '/\.[^.]+$/', '.webp', $path );
-    if ( file_exists( $webp ) ) {
-        $image[0] = preg_replace( '/\.[^.]+$/', '.webp', $url );
+    if ( ! empty( $image[0] ) ) {
+        $image[0] = ssic_webp_url( $image[0] );
     }
     return $image;
 }
+
 function ssic_srcset_webp( $sources, $size, $src, $meta, $id ) {
     foreach ( $sources as $w => $s ) {
-        $u    = $s['url'];
-        $path = str_replace( wp_get_upload_dir()['baseurl'], wp_get_upload_dir()['basedir'], $u );
-        $webp = preg_replace( '/\.[^.]+$/', '.webp', $path );
-        if ( file_exists( $webp ) ) {
-            $sources[$w]['url'] = preg_replace( '/\.[^.]+$/', '.webp', $u );
-        }
+        $sources[ $w ]['url'] = ssic_webp_url( $s['url'] );
     }
     return $sources;
 }
 
-// Settings page: quality slider + mass convert button
-function ssic_settings_page_content() {
-    $quality = (int) get_option( 'ssic_quality', 85 );
+// ─── Bulk Convert ─────────────────────────────────────────────────────────────
+
+add_action( 'admin_post_ssic_mass_convert', 'ssic_handle_mass_convert' );
+function ssic_handle_mass_convert() {
+    if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'ssic_mass_convert' ) ) {
+        wp_die( 'Unauthorized request.' );
+    }
+
+    $attachments = get_posts( [
+        'post_type'      => 'attachment',
+        'post_status'    => 'inherit',
+        'numberposts'    => -1,
+        'post_mime_type' => [ 'image/jpeg', 'image/png', 'image/gif' ],
+    ] );
+
+    $processed = 0;
+    foreach ( $attachments as $att ) {
+        if ( get_post_meta( $att->ID, SSIC_META_KEY, true ) ) continue;
+        ssic_convert_to_webp( $att->ID );
+        $processed++;
+    }
+
+    wp_safe_redirect( add_query_arg( 'ssic_converted', $processed, wp_get_referer() ) );
+    exit;
+}
+
+// ─── Admin Notices ────────────────────────────────────────────────────────────
+
+add_action( 'admin_notices', 'ssic_bulk_convert_notice' );
+function ssic_bulk_convert_notice() {
+    $screen = get_current_screen();
+    if ( ! $screen || strpos( $screen->id, SSIC_PAGE_SLUG ) === false ) return;
+    if ( ! isset( $_GET['ssic_converted'] ) ) return;
+
+    $n = intval( $_GET['ssic_converted'] );
+    printf(
+        '<div class="notice notice-success is-dismissible"><p>%s</p></div>',
+        sprintf( esc_html__( 'Done — converted %d image(s) to WebP.', 'ssic' ), $n )
+    );
+}
+
+// ─── Settings Page ────────────────────────────────────────────────────────────
+
+function ssic_settings_page() {
+    $quality      = (int) get_option( 'ssic_quality', SSIC_DEFAULT_QUALITY );
+    $opts         = SSIC_QUALITY_OPTIONS;
+    $slider_index = array_search( $quality, $opts ) !== false ? array_search( $quality, $opts ) : 1;
+    $total        = wp_count_posts( 'attachment' );
+    $convertible  = (int) ( $total->inherit ?? 0 );
     ?>
-    <div class="wrap">
+    <div class="wrap ssic-wrap">
+
         <h1>Image Converter</h1>
-        <form method="post" action="options.php">
-            <?php settings_fields( 'ssic_settings_group' ); ?>
-            <?php do_settings_sections( 'ssic_settings_group' ); ?>
-            <table class="form-table">
-                <tr>
-                    <td colspan="2" style="padding-left:0;">
-                        <input type="range" id="ssic_quality_slider" min="0" max="2" step="1" aria-label="Image quality slider" />
-                        <span id="ssic_quality_label" style="margin-left:10px;"></span>
+
+        <div class="ssic-grid">
+
+            <div class="ssic-card">
+                <h2>Conversion Quality</h2>
+                <p class="ssic-card-desc">Select the WebP output quality. Lower values produce smaller file sizes; 100% is lossless.</p>
+                <form method="post" action="options.php">
+                    <?php settings_fields( 'ssic_settings_group' ); ?>
+                    <div class="ssic-slider-wrap">
+                        <div class="ssic-slider-labels">
+                            <span>50%</span><span>85%</span><span>100%</span>
+                        </div>
+                        <input type="range" id="ssic_quality_slider" min="0" max="2" step="1" value="<?php echo esc_attr( $slider_index ); ?>" aria-label="Image quality" />
                         <input type="hidden" name="ssic_quality" id="ssic_quality" value="<?php echo esc_attr( $quality ); ?>" />
-                        <p class="description">Choose WebP quality: 50%, 85%, or 100%.</p>
-                    </td>
-                </tr>
-            </table>
-            <?php submit_button(); ?>
-        </form>
-        <hr />
-        <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
-            <?php wp_nonce_field( 'ssic_mass_convert' ); ?>
-            <input type="hidden" name="action" value="ssic_mass_convert" />
-            <?php submit_button( 'Convert Existing Images', 'secondary' ); ?>
-        </form>
+                    </div>
+                    <?php submit_button( 'Save Quality', 'primary ssic-btn', 'submit', false ); ?>
+                </form>
+            </div>
+
+            <div class="ssic-card">
+                <h2>Bulk Convert</h2>
+                <p class="ssic-card-desc">Convert all existing JPG, PNG, and GIF images in your media library that haven't been converted yet.</p>
+                <div class="ssic-stat">
+                    <span class="ssic-stat-num"><?php echo esc_html( $convertible ); ?></span>
+                    <span class="ssic-stat-label">attachments in library</span>
+                </div>
+                <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                    <?php wp_nonce_field( 'ssic_mass_convert' ); ?>
+                    <input type="hidden" name="action" value="ssic_mass_convert" />
+                    <?php submit_button( 'Convert Existing Images', 'secondary ssic-btn', 'submit', false ); ?>
+                </form>
+            </div>
+
+        </div>
+
     </div>
+
+    <style>
+    .ssic-wrap { max-width: 860px; margin-top: 24px; }
+
+    .ssic-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+    }
+
+    .ssic-card {
+        background: #fff;
+        border: 1px solid #dcdcdc;
+        border-radius: 6px;
+        padding: 24px;
+        box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    }
+    .ssic-card h2       { margin: 0 0 8px; font-size: 15px; }
+    .ssic-card-desc     { color: #666; font-size: 13px; margin: 0 0 20px; line-height: 1.5; }
+
+    .ssic-slider-wrap   { margin-bottom: 20px; }
+    .ssic-slider-labels { display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-bottom: 4px; }
+
+    #ssic_quality_slider {
+        width: 100%;
+        accent-color: #2271b1;
+        cursor: pointer;
+    }
+
+    .ssic-stat {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 20px;
+    }
+    .ssic-stat-num   { font-size: 28px; font-weight: 700; color: #2271b1; line-height: 1; }
+    .ssic-stat-label { font-size: 13px; color: #666; }
+
+    .ssic-btn { margin-top: 0 !important; }
+
+    @media ( max-width: 700px ) {
+        .ssic-grid { grid-template-columns: 1fr; }
+    }
+    </style>
+
     <script>
-    (function(){
-        var opts   = [50,85,100];
-        var slider = document.getElementById('ssic_quality_slider');
-        var hidden = document.getElementById('ssic_quality');
-        var label  = document.getElementById('ssic_quality_label');
-        var idx    = opts.indexOf(parseInt(hidden.value,10));
-        slider.value = idx<0?1:idx;
-        slider.oninput = function(){ hidden.value=opts[this.value]; label.textContent=opts[this.value]+'%'; };
-        label.textContent = opts[slider.value]+'%';
-    })();
+    (function () {
+        var opts   = <?php echo json_encode( $opts ); ?>;
+        var slider = document.getElementById( 'ssic_quality_slider' );
+        var hidden = document.getElementById( 'ssic_quality' );
+
+        slider.addEventListener( 'input', function () {
+            hidden.value = opts[ this.value ];
+        } );
+    } )();
     </script>
     <?php
 }
