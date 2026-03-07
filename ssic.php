@@ -2,7 +2,7 @@
 /*
 Plugin Name: Stupid Simple Image Converter
 Description: Automatically convert uploaded PNG, JPG, and GIF images to WebP format.
-Version: 1.3
+Version: 1.3.1
 Author: Dynamic Technologies
 Author URI: https://bedynamic.tech
 Plugin URI: https://github.com/bedynamictech/Stupid-Simple-Image-Converter
@@ -242,6 +242,7 @@ function ssic_settings_page() {
 
         </div>
 
+        <div style="position:fixed;bottom:24px;right:24px;"><a href="https://ko-fi.com/T6T61SZTST" target="_blank"><img height="36" style="border:0;height:36px;" src="https://storage.ko-fi.com/cdn/kofi6.png?v=6" alt="Buy Me a Coffee at ko-fi.com" /></a></div>
     </div>
 
     <style>
